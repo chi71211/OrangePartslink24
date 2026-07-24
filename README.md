@@ -148,34 +148,63 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    %% Partslink24 TPMS 爬蟲流程圖 — 簡化版
-    classDef phase_init fill:#FADBD8,stroke:#C0392B,stroke-width:2px,color:#641E16,font-weight:bold
-    classDef phase_nav fill:#D6EAF8,stroke:#2980B9,stroke-width:2px,color:#154360,font-weight:bold
-    classDef phase_parse fill:#D5F5E3,stroke:#27AE60,stroke-width:2px,color:#145A32,font-weight:bold
-    classDef phase_save fill:#FCF3CF,stroke:#F39C12,stroke-width:2px,color:#7D3C98,font-weight:bold
-    classDef decision fill:#FFFFFF,stroke:#7F8C8D,stroke-width:2px,stroke-dasharray:5 5
-    classDef phase_memory fill:#D5F5E3,stroke:#1ABC9C,stroke-width:2px,color:#145A32,font-weight:bold
+    %% Interpneu TPMS 爬蟲流程圖 (V11.py 架構) - 四柱型簡報版
+    classDef box_white fill:#FFFFFF,stroke:#7F8C8D,stroke-width:2px,color:#2C3E50
+    classDef box_red fill:#FDEDEC,stroke:#E74C3C,stroke-width:2px,color:#C0392B,font-weight:bold
+    classDef box_blue fill:#EBF5FB,stroke:#3498DB,stroke-width:2px,color:#21618C,font-weight:bold
+    classDef box_green fill:#EAFAF1,stroke:#2ECC71,stroke-width:2px,color:#186A3B,font-weight:bold
+    classDef db_yellow fill:#FEF9E7,stroke:#F1C40F,stroke-width:2px,color:#B7950B,font-weight:bold
+    classDef decision fill:#F8F9F9,stroke:#95A5A6,stroke-width:2px,color:#2C3E50
+    classDef start_end fill:#EAECEE,stroke:#7F8C8D,stroke-width:2px,color:#2C3E50,rx:20,ry:20
 
-    A([開始]) --> B["啟動 Chromium"]:::phase_init
-    B --> C["登入帳號"]:::phase_init
-    C --> D["檢查 7 天週期<br>scrape_progress.json"]:::phase_memory
-    D --> E{"品牌類型?"}:::decision
-    E -- "BMW / MINI" --> F["BMW 導覽<br>車系→車型→引擎→ECE"]:::phase_nav
-    E -- "Audi / VW / Porsche<br>SEAT / Skoda / Cupra" --> G["VAG 導覽<br>車款→年份→限制條件"]:::phase_nav
-    F --> H["搜尋 433MHz"]:::phase_parse
-    G --> I["搜尋 Sensor<br>für Reifendruck"]:::phase_parse
-    H --> J{"有結果?"}:::decision
-    I --> J
-    J -- "是" --> K["提取零件號碼<br>過濾 TPMS"]:::phase_parse
-    J -- "否" --> L["切換車款"]:::phase_parse
-    K --> M["寫入 SQLite<br>UNIQUE 去重"]:::phase_save
-    M --> N["儲存進度<br>scrape_progress.json"]:::phase_memory
-    N --> O{"下一個?"}:::decision
-    O -- "有" --> E
-    O -- "無" --> P["匯出 CSV"]:::phase_save
-    P --> Q([結束])
+    subgraph S1 ["① 啟動與環境自適應"]
+        direction TB
+        A(["系統手動啟動"]):::start_end --> B["自動安裝缺失套件<br>(突破底層保護)"]:::box_white
+        B --> C{"超過 7 天未更新?"}:::decision
+        C -- "是" --> D["【全面更新】<br>清除舊斷點紀錄"]:::box_red
+        C -- "否" --> E["【繼續進度】<br>載入 JSON 斷點"]:::box_red
+    end
 
-    L --> E
+    subgraph S2 ["② 智能導航與聚合設定"]
+        direction TB
+        F[("連接 SQLite<br>建立資料表")]:::db_yellow --> G[("建立 SQL View<br>(設定合併與壓縮)")]:::db_yellow
+        G --> H["展開全站品牌<br>(過濾已完成)"]:::box_blue
+        H --> I["遍歷車系與型號<br>(Model / Typ)"]:::box_blue
+        I --> J["依年份新到舊排序<br>(Year)"]:::box_blue
+    end
+
+    subgraph S3 ["③ 靜態 API 攔截與解析"]
+        direction TB
+        K["呼叫 API 1<br>(獲取 HSN / TSN)"]:::box_green --> L{"有 OE 原廠<br>感測器?"}:::decision
+        L -- "無" --> M["寫入空值保留"]:::box_white
+        L -- "有" --> N["呼叫 API 2<br>(獲取深度規格)"]:::box_green
+        N --> O["解析 JSON 結構<br>(廠商/頻率/日期)"]:::box_green
+        M --> O
+        O --> P["加入暫存佇列<br>(batch_data)"]:::box_white
+    end
+
+    subgraph S4 ["④ 無損寫入與安全防護"]
+        direction TB
+        Q{"遭遇中斷?<br>(Ctrl+C / 暫停)"}:::decision
+        Q -- "是 (觸發防護)" --> R[("強制寫入殘留<br>保留當前斷點")]:::db_yellow
+        Q -- "否 (平穩運行)" --> S{"暫存滿 80 筆?"}:::decision
+        S -- "是" --> T[("寫入資料庫<br>(REPLACE INTO)")]:::db_yellow
+        S -- "否" --> U["累積數據，繼續抓取"]:::box_white
+        T -.-> V["(該品牌全數完成時)<br>透過 View 匯出 Excel"]:::box_white
+        V -- "(所有品牌完成)" --> W[("匯出 .sql 備份檔")]:::db_yellow
+        W --> X(["程式安全退出"]):::start_end
+        R --> X
+    end
+
+    %% 跨模組連結 (模組間推進)
+    D --> F
+    E --> F
+    J --> K
+    P --> Q
+
+    %% 回圈動線 (使用虛線表示狀態返回)
+    U -.->|返回| I
+    V -.->|下一品牌| H
 ```
 
 ---
