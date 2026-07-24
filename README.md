@@ -148,63 +148,75 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    %% Interpneu TPMS 爬蟲流程圖 (V11.py 架構) - 四柱型簡報版
-    classDef box_white fill:#FFFFFF,stroke:#7F8C8D,stroke-width:2px,color:#2C3E50
+    %% Partslink24 TPMS 爬蟲流程圖 - 四柱完美排版版
+    classDef box_white fill:#FFFFFF,stroke:#7F8C8D,stroke-width:2px,color:#2C3E50,font-weight:bold
     classDef box_red fill:#FDEDEC,stroke:#E74C3C,stroke-width:2px,color:#C0392B,font-weight:bold
     classDef box_blue fill:#EBF5FB,stroke:#3498DB,stroke-width:2px,color:#21618C,font-weight:bold
     classDef box_green fill:#EAFAF1,stroke:#2ECC71,stroke-width:2px,color:#186A3B,font-weight:bold
     classDef db_yellow fill:#FEF9E7,stroke:#F1C40F,stroke-width:2px,color:#B7950B,font-weight:bold
-    classDef decision fill:#F8F9F9,stroke:#95A5A6,stroke-width:2px,color:#2C3E50
-    classDef start_end fill:#EAECEE,stroke:#7F8C8D,stroke-width:2px,color:#2C3E50,rx:20,ry:20
+    classDef decision fill:#F8F9F9,stroke:#95A5A6,stroke-width:2px,color:#2C3E50,font-weight:bold
+    classDef start_end fill:#EAECEE,stroke:#7F8C8D,stroke-width:2px,color:#2C3E50,rx:20,ry:20,font-weight:bold
+    classDef loop_back fill:#F4F6F7,stroke:#34495E,stroke-width:2px,color:#2C3E50,stroke-dasharray: 5 5
 
     subgraph S1 ["① 啟動與環境自適應"]
         direction TB
-        A(["系統手動啟動"]):::start_end --> B["自動安裝缺失套件<br>(突破底層保護)"]:::box_white
-        B --> C{"超過 7 天未更新?"}:::decision
-        C -- "是" --> D["【全面更新】<br>清除舊斷點紀錄"]:::box_red
-        C -- "否" --> E["【繼續進度】<br>載入 JSON 斷點"]:::box_red
+        A(["系統手動啟動"]):::start_end --> B{"檢查 7 天週期<br>scrape_progress.json"}:::decision
+        B -- "檔案不存在" --> C["全新週期<br>cycle_start = now"]:::box_white
+        B -- "< 7天" --> D["接續執行<br>載入已完成清單"]:::box_white
+        B -- "> 7天" --> E["清空進度<br>重新開始"]:::box_red
+        C --> F["啟動 Chromium"]:::box_white
+        D --> F
+        E --> F
+        F --> G["移除彈窗<br>登入帳號"]:::box_white
     end
 
-    subgraph S2 ["② 智能導航與聚合設定"]
+    subgraph S2 ["② 智能導航與雙軌設定"]
         direction TB
-        F[("連接 SQLite<br>建立資料表")]:::db_yellow --> G[("建立 SQL View<br>(設定合併與壓縮)")]:::db_yellow
-        G --> H["展開全站品牌<br>(過濾已完成)"]:::box_blue
-        H --> I["遍歷車系與型號<br>(Model / Typ)"]:::box_blue
-        I --> J["依年份新到舊排序<br>(Year)"]:::box_blue
+        H{"品牌類型?"}:::decision
+        H -- "BMW / MINI" --> I["BMW 導覽<br>車系→車型→引擎→ECE"]:::box_blue
+        H -- "Audi / VW / Porsche..." --> J["VAG 導覽<br>車款→年份→限制條件"]:::box_blue
     end
 
-    subgraph S3 ["③ 靜態 API 攔截與解析"]
+    subgraph S3 ["③ 智慧搜尋與解析"]
         direction TB
-        K["呼叫 API 1<br>(獲取 HSN / TSN)"]:::box_green --> L{"有 OE 原廠<br>感測器?"}:::decision
-        L -- "無" --> M["寫入空值保留"]:::box_white
-        L -- "有" --> N["呼叫 API 2<br>(獲取深度規格)"]:::box_green
-        N --> O["解析 JSON 結構<br>(廠商/頻率/日期)"]:::box_green
-        M --> O
-        O --> P["加入暫存佇列<br>(batch_data)"]:::box_white
+        K["搜尋 433MHz"]:::box_green
+        L["搜尋 Sensor<br>für Reifendruck"]:::box_green
+        M{"有結果?"}:::decision
+        
+        K --> M
+        L --> M
+        M -- "是" --> N["提取零件號碼<br>過濾 TPMS"]:::box_green
+        M -- "否" --> O["切換車款"]:::box_white
+        
+        %% 使用標籤代替跨區塊逆向箭頭
+        O -.-> O_loop>返回 ② 重新選擇車系]:::loop_back
     end
 
     subgraph S4 ["④ 無損寫入與安全防護"]
         direction TB
-        Q{"遭遇中斷?<br>(Ctrl+C / 暫停)"}:::decision
-        Q -- "是 (觸發防護)" --> R[("強制寫入殘留<br>保留當前斷點")]:::db_yellow
-        Q -- "否 (平穩運行)" --> S{"暫存滿 80 筆?"}:::decision
-        S -- "是" --> T[("寫入資料庫<br>(REPLACE INTO)")]:::db_yellow
-        S -- "否" --> U["累積數據，繼續抓取"]:::box_white
-        T -.-> V["(該品牌全數完成時)<br>透過 View 匯出 Excel"]:::box_white
-        V -- "(所有品牌完成)" --> W[("匯出 .sql 備份檔")]:::db_yellow
-        W --> X(["程式安全退出"]):::start_end
-        R --> X
+        P[("寫入 SQLite<br>UNIQUE 去重")]:::db_yellow --> Q[("儲存進度<br>scrape_progress.json")]:::db_yellow
+        Q --> R{"下一個車款?"}:::decision
+        
+        R -- "全部完成" --> T["匯出 CSV 檔案"]:::box_white
+        T --> U(["程式安全退出"]):::start_end
+        
+        R -- "有更多" --> S{"檢查異常狀態"}:::decision
+        S -- "正常" --> V["隨機等待 5-10 秒"]:::box_white
+        S -- "EPIPE / 超時" --> W["重新啟動 Chromium"]:::box_red
+        S -- "Ctrl+C" --> X[("緊急安全存檔")]:::db_yellow
+        
+        X --> Y(["下次啟動自動接續"]):::start_end
+        
+        %% 使用標籤代替跨區塊逆向箭頭
+        V -.-> V_loop>返回 ② 導覽下一車款]:::loop_back
+        W -.-> W_loop>返回 ① 重新登入系統]:::loop_back
     end
 
-    %% 跨模組連結 (模組間推進)
-    D --> F
-    E --> F
-    J --> K
-    P --> Q
-
-    %% 回圈動線 (使用虛線表示狀態返回)
-    U -.->|返回| I
-    V -.->|下一品牌| H
+    %% 跨模組單向推進動線 (嚴格確保 1 ➔ 2 ➔ 3 ➔ 4)
+    G --> H
+    I --> K
+    J --> L
+    N --> P
 ```
 
 ---
