@@ -1,0 +1,12 @@
+{
+  "cycle_start": 1785131707.59006,
+  "completed": [
+    "bmw:3'",
+    "bmw:X3",
+    "audi:Audi A4"
+  ],
+  "last_brand": "audi",
+  "last_model": "Audi A4",
+  "total_scraped": 0,
+  "last_save": 1785291038.253727
+}

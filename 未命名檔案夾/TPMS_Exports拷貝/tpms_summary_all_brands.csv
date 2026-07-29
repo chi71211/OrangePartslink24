@@ -1,0 +1,28 @@
+Brand,Series,Model,Engine/Year,Teilenummer,Description,SearchTerm
+BMW,All 433MHz,BMW 3/5/X3/X5/etc,,36 10 6 856 227,Radelektronikmodul RDC 433MHZ,433MHz
+BMW,All 433MHz,BMW 3/5/X3/X5/etc,,36 10 6 874 829,Radelektronikmodul RDC 433MHZ,433MHz
+BMW,All 433MHz,BMW 3/5/X3/X5/etc,,36 10 6 874 830,Radelektronikmodul RDC 433MHZ,433MHz
+BMW,All 433MHz,BMW 3/5/X3/X5/etc,,36 10 6 890 964,Radelektronikmodul RDC 433MHZ,433MHz
+BMW,All 433MHz,BMW 3/5/X3/X5/etc,,36 10 6 877 937,Radelektronikmodul RDC 433MHZ,433MHz
+BMW,All 315MHz,BMW 3/5/X3/X5/etc,,36 10 6 877 934,Radelektronikmodul RDC 315MHZ,315MHz
+MINI,Countryman/Clubman/Cooper,MINI F60/F54/F56,B36/B38/B47,36 10 6 856 227,Radelektronikmodul RDC 433MHZ (BMW),433MHz
+MINI,Countryman/Clubman/Cooper,MINI F60/F54/F56,B36/B38/B47,36 10 6 874 829,Radelektronikmodul RDC 433MHZ (BMW),433MHz
+MINI,Countryman/Clubman/Cooper,MINI F60/F54/F56,B36/B38/B47,36 10 6 874 830,Radelektronikmodul RDC 433MHZ (BMW),433MHz
+MINI,Countryman/Clubman/Cooper,MINI F60/F54/F56,B36/B38/B47,36 10 6 890 964,Radelektronikmodul RDC 433MHZ (BMW),433MHz
+MINI,Countryman/Clubman/Cooper,MINI F60/F54/F56,B36/B38/B47,36 10 6 877 937,Radelektronikmodul RDC 433MHZ (BMW),433MHz
+AUDI,A3/Q5,"Audi A3, Q5",2025,95C 907 255,Sensor für Reifendruck,Sensor für Reifendruck
+VW,Golf,VW Golf Variant,2024,5WA 907 65,Reifendrucksensor,Reifendrucksensor
+VW,Golf,VW Golf Variant,2024,5WA 959 65,Reifendrucksensor,Reifendrucksensor
+VW,Golf,VW Golf Variant,2024,5H4 839 90,Reifendrucksensor,Reifendrucksensor
+VW,Tiguan,VW Tiguan,2024,5Q0 998 270 F,Reifendrucksensor,Reifendrucksensor
+VW,Tiguan,VW Tiguan,2024,5Q0 907 273 C,Steuergerät für Reifendruck,Sensor für Reifendruck
+PORSCHE,Taycan,Porsche Taycan 9J1,2024,9J1 907 275 S,Sensor für Reifendruck,Sensor für Reifendruck
+PORSCHE,Taycan,Porsche Taycan 9J1,2024,PAB 907 275 S,Sensor für Reifendruck,Sensor für Reifendruck
+PORSCHE,Macan,Porsche Macan,2024,PAD 907 255 A,Sensor für Reifendruck,Sensor für Reifendruck
+PORSCHE,Macan,Porsche Macan,2024,PAB 907 275 S,Sensor für Reifendruck,Sensor für Reifendruck
+SEAT,Leon,Leon (SEAT & CUPRA),2024,5FA 837 901 F,Reifendrucksensor,Reifendrucksensor
+SEAT,Leon,Leon (SEAT & CUPRA),2024,5WA 907 65,Reifendrucksensor,Reifendrucksensor
+SKODA,Octavia,Skoda Octavia,2024,5E3 010 000 L,Reifendrucksensor,Reifendrucksensor
+SKODA,Octavia,Skoda Octavia,2024,81A 907 660 B,Sensor für Reifendruck,Sensor für Reifendruck
+CUPRA,Leon,Leon (SEAT & CUPRA),2024,5FA 837 901 F,Reifendrucksensor,Reifendrucksensor
+CUPRA,Leon,Leon (SEAT & CUPRA),2024,5WA 907 65,Reifendrucksensor,Reifendrucksensor

@@ -1,0 +1,39 @@
+flowchart LR
+    %% Partslink24 TPMS 爬蟲流程圖 — 簡化版
+    classDef phase_init fill:#FADBD8,stroke:#C0392B,stroke-width:2px,color:#641E16,font-weight:bold
+    classDef phase_nav fill:#D6EAF8,stroke:#2980B9,stroke-width:2px,color:#154360,font-weight:bold
+    classDef phase_parse fill:#D5F5E3,stroke:#27AE60,stroke-width:2px,color:#145A32,font-weight:bold
+    classDef phase_save fill:#FCF3CF,stroke:#F39C12,stroke-width:2px,color:#7D3C98,font-weight:bold
+    classDef decision fill:#FFFFFF,stroke:#7F8C8D,stroke-width:2px,stroke-dasharray:5 5
+    classDef phase_memory fill:#D5F5E3,stroke:#1ABC9C,stroke-width:2px,color:#145A32,font-weight:bold
+
+    A([開始]) --> B{"檢查 7 天週期<br>scrape_progress.json"}:::decision
+    B -- "檔案不存在" --> C["全新週期<br>cycle_start = now"]:::phase_memory
+    B -- "< 7天" --> D["接續執行<br>載入已完成清單"]:::phase_memory
+    B -- "> 7天" --> E["清空進度<br>重新開始"]:::phase_memory
+    C --> F["啟動 Chromium"]:::phase_init
+    D --> F
+    E --> F
+    F --> G["移除彈窗<br>登入帳號"]:::phase_init
+    G --> H{"品牌類型?"}:::decision
+    H -- "BMW / MINI" --> I["BMW 導覽<br>車系→車型→引擎→ECE"]:::phase_nav
+    H -- "Audi / VW / Porsche<br>SEAT / Skoda / Cupra" --> J["VAG 導覽<br>車款→年份→限制條件"]:::phase_nav
+    I --> K["搜尋 433MHz"]:::phase_parse
+    J --> L["搜尋 Sensor<br>für Reifendruck"]:::phase_parse
+    K --> M{"有結果?"}:::decision
+    L --> M
+    M -- "是" --> N["提取零件號碼<br>過濾 TPMS"]:::phase_parse
+    M -- "否" --> O["切換車款"]:::phase_parse
+    N --> P["寫入 SQLite<br>UNIQUE 去重"]:::phase_save
+    P --> Q["儲存進度<br>scrape_progress.json"]:::phase_memory
+    Q --> R{"下一個車款?"}:::decision
+    R -- "有更多" --> S{"檢查異常"}:::decision
+    R -- "全部完成" --> T["匯出 CSV"]:::phase_save
+    T --> U([結束])
+    S -- "正常" --> V["隨機等待 5-10 秒"]:::phase_save
+    S -- "EPIPE / 超時" --> W["重新啟動 Chromium"]:::phase_init
+    S -- "Ctrl+C" --> X["緊急安全存檔"]:::phase_save
+    V --> H
+    W --> G
+    X --> Y([下次啟動<br>自動接續])
+    O --> H
