@@ -76,6 +76,51 @@ class DatabaseManager:
         self.cursor = self.conn.cursor()
         self.batch = []
         self._init_db()
+        self.changelog_path = Config.CSV_DIR + '/autobild_changelog.xlsx'
+        self._init_changelog()
+
+    def _init_changelog(self):
+        try:
+            if os.path.exists(self.changelog_path):
+                wb = load_workbook(self.changelog_path)
+                if 'Changelog' not in wb.sheetnames:
+                    ws = wb.create_sheet('Changelog', 0)
+                    ws.append(['Timestamp', 'Action', 'Brand', 'Model', 'Category', 'Fuel_Type', 'Typ', 'Start_Year', 'End_Year', 'HSN_TSN_Old', 'HSN_TSN_New'])
+                    ws.column_dimensions['A'].width = 20
+                    for col in ['B','C','D','E','F','G','H','I','J','K']:
+                        ws.column_dimensions[col].width = 16
+                wb.close()
+            else:
+                wb = Workbook()
+                ws = wb.active
+                ws.title = 'Changelog'
+                ws.append(['Timestamp', 'Action', 'Brand', 'Model', 'Category', 'Fuel_Type', 'Typ', 'Start_Year', 'End_Year', 'HSN_TSN_Old', 'HSN_TSN_New'])
+                ws.column_dimensions['A'].width = 20
+                for col in ['B','C','D','E','F','G','H','I','J','K']:
+                    ws.column_dimensions[col].width = 16
+                wb.save(self.changelog_path)
+                wb.close()
+        except Exception:
+            pass
+
+    def _log_changelog(self, records):
+        try:
+            wb = load_workbook(self.changelog_path)
+            ws = wb['Changelog']
+            green = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+            red = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+            for action, r in records:
+                ts = time.strftime('%Y-%m-%d %H:%M:%S')
+                row_data = [ts, action, r.get('Brand',''), r.get('Model',''), r.get('Category',''), r.get('Fuel_Type',''), r.get('Typ',''), r.get('Start_Year',''), r.get('End_Year',''), r.get('_hsn_old',''), r.get('HSN_TSN','')]
+                ws.append(row_data)
+                new_row = ws.max_row
+                fill = green if action == 'INSERT' else red
+                for col in range(1, len(row_data) + 1):
+                    ws.cell(row=new_row, column=col).fill = fill
+            wb.save(self.changelog_path)
+            wb.close()
+        except Exception:
+            pass
 
     def _init_db(self):
         self.cursor.execute('''
@@ -127,18 +172,43 @@ class DatabaseManager:
     def flush(self):
         if not self.batch:
             return
+        changelog_entries = []
         for r in self.batch:
+            brand = r.get('Brand', 'N/A')
+            model = r.get('Model', 'N/A')
+            cat = r.get('Category', 'N/A')
+            fuel = r.get('Fuel_Type', 'N/A')
+            typ = r.get('Typ', 'N/A')
+            sy = r.get('Start_Year', 'N/A')
+            ey = r.get('End_Year', 'N/A')
+            hsn = r.get('HSN_TSN', 'N/A')
+
             self.cursor.execute('''
-                INSERT OR IGNORE INTO car_catalog
-                (Brand, Model, Category, Fuel_Type, Typ, Start_Year, End_Year, HSN_TSN)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                r.get('Brand', 'N/A'), r.get('Model', 'N/A'),
-                r.get('Category', 'N/A'), r.get('Fuel_Type', 'N/A'),
-                r.get('Typ', 'N/A'), r.get('Start_Year', 'N/A'),
-                r.get('End_Year', 'N/A'), r.get('HSN_TSN', 'N/A')
-            ))
+                SELECT rowid, HSN_TSN FROM car_catalog
+                WHERE Brand=? AND Model=? AND Category=? AND Fuel_Type=? AND Typ=?
+                  AND Start_Year=? AND End_Year=?
+            ''', (brand, model, cat, fuel, typ, sy, ey))
+            existing = self.cursor.fetchone()
+
+            if existing:
+                rowid, old_hsn = existing
+                if old_hsn != hsn:
+                    self.cursor.execute('UPDATE car_catalog SET HSN_TSN=? WHERE rowid=?', (hsn, rowid))
+                    r['_hsn_old'] = old_hsn
+                    changelog_entries.append(('UPDATE', r))
+                else:
+                    pass
+            else:
+                self.cursor.execute('''
+                    INSERT INTO car_catalog
+                    (Brand, Model, Category, Fuel_Type, Typ, Start_Year, End_Year, HSN_TSN)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (brand, model, cat, fuel, typ, sy, ey, hsn))
+                r['_hsn_old'] = ''
+                changelog_entries.append(('INSERT', r))
         self.conn.commit()
+        if changelog_entries:
+            self._log_changelog(changelog_entries)
         self.batch.clear()
 
     def get_progress(self, brand: str, model: str):
