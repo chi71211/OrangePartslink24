@@ -18,9 +18,13 @@ import re
 import json
 import time
 import random
+import shutil
+from datetime import datetime
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from tqdm import tqdm
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 
 # ==========================================
 # 全域設定 (檔案路徑與變數 V10)
@@ -165,15 +169,24 @@ def save_batch_to_sql(batch_data):
             'created date', 'OE sensor', 'OE Nummer', 'Manufacturer', 'Frequency']
     df_merged = df_merged.reindex(columns=cols)
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.executemany('''
-        REPLACE INTO tpms_sensors 
-        ("Brand", "Model", "Typ", "Start Year", "End Year", "HSN", "TSN", "created date", 
-         "OE sensor", "OE Nummer", "Manufacturer", "Frequency")
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', df_merged.values.tolist())
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute('''CREATE TABLE IF NOT EXISTS tpms_sensors (
+            "Brand" TEXT, "Model" TEXT, "Typ" TEXT, "Start Year" TEXT, "End Year" TEXT,
+            "HSN" TEXT, "TSN" TEXT, "created date" TEXT,
+            "OE sensor" TEXT, "OE Nummer" TEXT, "Manufacturer" TEXT, "Frequency" TEXT,
+            UNIQUE("Brand", "Model", "Typ", "Start Year", "End Year", "HSN", "TSN", "OE sensor", "created date")
+        )''')
+        conn.executemany('''
+            REPLACE INTO tpms_sensors
+            ("Brand", "Model", "Typ", "Start Year", "End Year", "HSN", "TSN", "created date",
+             "OE sensor", "OE Nummer", "Manufacturer", "Frequency")
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', df_merged.values.tolist())
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ DB 寫入失敗: {e}")
 
 def auto_export_sql():
     if not os.path.exists(DB_PATH): return
@@ -187,92 +200,243 @@ def auto_export_sql():
 # ==========================================
 # 4. 更新差異報表產出 (Diff) - O(舊)與N(新)並排模式
 # ==========================================
-def export_diff_excel(brand, old_df, new_df, output_dir):
-    if old_df.empty: return 
-    
-    keys = ['Brand', 'Model', 'Typ']
+def _new_records_from_df(brand, df):
+    compare_cols = ['HSN', 'TSN', 'created date', 'OE sensor', 'OE Nummer', 'Manufacturer', 'Frequency']
+    records = []
+    for _, row in df.iterrows():
+        rec = {
+            '變更狀態': '新增 (New)', 'Brand': row['Brand'], 'Model': row['Model'],
+            'Typ': row['Typ'], '年份': row['年份']
+        }
+        for col in compare_cols:
+            rec[f'{col} (O)'] = ""
+            rec[f'{col} (N)'] = str(row[col]) if col in df.columns and pd.notna(row[col]) else ""
+        records.append(rec)
+    return records
+
+def export_diff_excel(brand, old_df, new_df):
+    keys = ['Brand', 'Model', 'Typ', '年份']
+    compare_cols = ['HSN', 'TSN', 'created date', 'OE sensor', 'OE Nummer', 'Manufacturer', 'Frequency']
+
+    if old_df.empty:
+        return _new_records_from_df(brand, new_df)
+
     old_b = old_df[old_df['Brand'] == brand].copy()
-    if old_b.empty: return # 無舊資料視同首抓，不產出差異表
-        
+    if old_b.empty:
+        return _new_records_from_df(brand, new_df)
+
     old_b = old_b.set_index(keys)
     new_b = new_df.set_index(keys)
-    
+
     new_idx = new_b.index.difference(old_b.index)
     common_idx = new_b.index.intersection(old_b.index)
-    
-    compare_cols = ['年份', 'HSN', 'TSN', 'created date', 'OE sensor', 'OE Nummer', 'Manufacturer', 'Frequency']
+
     diff_records = []
-    
-    # --- 1. 處理修改的車款 (Updated) ---
+
     for idx in common_idx:
         old_row = old_b.loc[idx]
         new_row = new_b.loc[idx]
+        if isinstance(old_row, pd.DataFrame) or isinstance(new_row, pd.DataFrame):
+            continue
         is_changed = False
-        
-        record = {'變更狀態': '修改 (Updated)', 'Brand': idx[0], 'Model': idx[1], 'Typ': idx[2]}
-        
+        record = {'變更狀態': '修改 (Updated)', 'Brand': idx[0], 'Model': idx[1], 'Typ': idx[2], '年份': idx[3]}
         for col in compare_cols:
             val_o = str(old_row[col]) if col in old_b.columns and pd.notna(old_row[col]) else ""
             val_n = str(new_row[col]) if col in new_b.columns and pd.notna(new_row[col]) else ""
-            
             record[f'{col} (O)'] = val_o
             record[f'{col} (N)'] = val_n
             if val_o != val_n: is_changed = True
-                
         if is_changed:
             diff_records.append(record)
-            
-    # --- 2. 處理全新新增的車款 (New) ---
+
     for idx in new_idx:
         new_row = new_b.loc[idx]
-        record = {'變更狀態': '新增 (New)', 'Brand': idx[0], 'Model': idx[1], 'Typ': idx[2]}
+        if isinstance(new_row, pd.DataFrame):
+            continue
+        record = {'變更狀態': '新增 (New)', 'Brand': idx[0], 'Model': idx[1], 'Typ': idx[2], '年份': idx[3]}
         for col in compare_cols:
             record[f'{col} (O)'] = ""
             record[f'{col} (N)'] = str(new_row[col]) if col in new_b.columns and pd.notna(new_row[col]) else ""
         diff_records.append(record)
-        
-    if not diff_records: return # 沒變更就跳過
-        
-    diff_df = pd.DataFrame(diff_records)
-    
-    # 重排欄位，讓 (O) 跟 (N) 靠在一起
-    cols_order = ['變更狀態', 'Brand', 'Model', 'Typ']
+
+    if not diff_records:
+        return []
+
+    tqdm.write(f"📝 發現 {len(diff_records)} 筆變更 ({brand})")
+    return diff_records
+
+# ==========================================
+# 5. 變更紀錄.xlsx — 每次新增一個分頁（日期命名）
+# ==========================================
+def _merge_diff_records(existing, new_records):
+    seen = {}
+    for r in existing + new_records:
+        key = (str(r.get('變更狀態','')), str(r.get('Brand','')), str(r.get('Model','')), str(r.get('Typ','')))
+        seen[key] = r
+    return list(seen.values())
+
+def append_diff_to_excel(output_dir, all_diff_records):
+    today_str = datetime.now().strftime('%Y%m%d')
+
+    output_path = os.path.join(output_dir, "變更紀錄.xlsx")
+    if os.path.exists(output_path):
+        wb = load_workbook(output_path)
+    else:
+        wb = Workbook()
+        if "Sheet" in wb.sheetnames:
+            del wb["Sheet"]
+
+    if today_str in wb.sheetnames:
+        existing = []
+        ws_old = wb[today_str]
+        old_headers = [ws_old.cell(1, c).value for c in range(1, ws_old.max_column+1)]
+        for r in range(2, ws_old.max_row+1):
+            row_data = {}
+            for c, h in enumerate(old_headers, 1):
+                row_data[h] = ws_old.cell(r, c).value
+            if row_data:
+                existing.append(row_data)
+        del wb[today_str]
+        all_diff_records = _merge_diff_records(existing, all_diff_records)
+
+    ws = wb.create_sheet(title=today_str)
+
+    if not all_diff_records:
+        ws.cell(row=1, column=1, value="本日無任何變更")
+        wb.save(output_path)
+        print(f"📊 變更紀錄已新增分頁 [{today_str}] → 無變更")
+        return
+
+    diff_df = pd.DataFrame(all_diff_records)
+    diff_df = diff_df.drop_duplicates(subset=['變更狀態', 'Brand', 'Model', 'Typ'])
+
+    compare_cols = ['HSN', 'TSN', 'created date', 'OE sensor', 'OE Nummer', 'Manufacturer', 'Frequency']
+    cols_order = ['變更狀態', 'Brand', 'Model', 'Typ', '年份']
     for col in compare_cols:
         cols_order.append(f'{col} (O)')
         cols_order.append(f'{col} (N)')
     diff_df = diff_df[cols_order]
 
-    # --- 設定 Excel 條件樣式 ---
-    def highlight_diff(df_in):
-        style_df = pd.DataFrame('', index=df_in.index, columns=df_in.columns)
-        for i, row in df_in.iterrows():
-            status = row['變更狀態']
-            if status == '新增 (New)':
-                style_df.iloc[i] = 'background-color: #e8f5e9; color: #1b5e20;' # 整列淡綠
-                style_df.at[i, '變更狀態'] = 'background-color: #e8f5e9; color: #1b5e20; font-weight: bold;'
-            else:
-                style_df.at[i, '變更狀態'] = 'color: #e65100; font-weight: bold;' # 狀態字橘色
-                for col in compare_cols:
-                    col_o = f'{col} (O)'
-                    col_n = f'{col} (N)'
-                    # 若新舊不同，O欄紅字紅底，N欄綠字綠底
-                    if row[col_o] != row[col_n]:
-                        style_df.at[i, col_o] = 'color: #d32f2f; font-weight: bold; background-color: #ffebee;'
-                        style_df.at[i, col_n] = 'color: #2e7d32; font-weight: bold; background-color: #e8f5e9;'
-        return style_df
+    red_fill = PatternFill(start_color='FFEBEE', end_color='FFEBEE', fill_type='solid')
+    red_font = Font(color='D32F2F', bold=True)
+    green_fill = PatternFill(start_color='E8F5E9', end_color='E8F5E9', fill_type='solid')
+    green_font = Font(color='2E7D32', bold=True)
+    orange_font = Font(color='E65100', bold=True)
+    header_fill = PatternFill(start_color='F5F5F5', end_color='F5F5F5', fill_type='solid')
+    header_font = Font(bold=True)
+    new_row_fill = PatternFill(start_color='E8F5E9', end_color='E8F5E9', fill_type='solid')
+    new_row_font = Font(color='1B5E20')
 
-    styled_df = diff_df.style.apply(highlight_diff, axis=None)
+    headers = list(diff_df.columns)
+    for col_idx, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_idx, value=h)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal='center')
 
-    # --- 寫入檔案 ---
-    diff_dir = os.path.join(output_dir, "更新差異報表")
-    os.makedirs(diff_dir, exist_ok=True)
-    diff_file = os.path.join(diff_dir, f"{sanitize_filename(brand)}_變更紀錄(ON並排).xlsx")
-    
-    styled_df.to_excel(diff_file, index=False)
-    tqdm.write(f"📝 發現更新，已產出左右比對差異報表 → {os.path.basename(diff_file)}")
+    for r_idx, (_, row) in enumerate(diff_df.iterrows(), 2):
+        status = row['變更狀態']
+        is_new = (status == '新增 (New)')
+        for col_idx, col_name in enumerate(headers, 1):
+            val = row[col_name]
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                val = ""
+            cell = ws.cell(row=r_idx, column=col_idx, value=val)
+            if is_new:
+                cell.fill = new_row_fill
+                cell.font = new_row_font
+            elif col_name == '變更狀態':
+                cell.font = orange_font
+            elif col_name.endswith(' (O)') or col_name.endswith(' (N)'):
+                base = col_name[:-4]
+                col_o = f'{base} (O)'
+                col_n = f'{base} (N)'
+                if col_o in headers and col_n in headers:
+                    o_val = row[col_o]
+                    n_val = row[col_n]
+                    if str(o_val) != str(n_val):
+                        if col_name.endswith(' (O)'):
+                            cell.fill = red_fill
+                            cell.font = red_font
+                        else:
+                            cell.fill = green_fill
+                            cell.font = green_font
+
+    wb.save(output_path)
+    print(f"📊 變更紀錄已新增分頁 [{today_str}] → {os.path.basename(output_path)}")
 
 # ==========================================
-# 5. 主程式 (爬蟲核心迴圈)
+# 6. DB 備份 (每次執行開始前備份目前 DB)
+# ==========================================
+def backup_db():
+    if not os.path.exists(DB_PATH):
+        print("📦 DB 不存在，略過備份")
+        return
+    backup_path = os.path.join(SCRIPT_DIR, "胎壓檢測器資料庫_V10_備份.db")
+    try:
+        shutil.copy2(DB_PATH, backup_path)
+        print(f"📦 DB 備份完成 → {os.path.basename(backup_path)}")
+    except Exception as e:
+        print(f"⚠️ DB 備份失敗: {e}")
+
+def _brand_df_to_excel(brand_df, brand, folder_path):
+    for col in ['HSN','TSN','created date','OE sensor','OE Nummer','Manufacturer','Frequency']:
+        if col in brand_df.columns:
+            brand_df[col] = brand_df[col].apply(add_space_after_comma)
+    if '年份' not in brand_df.columns:
+        brand_df['年份'] = brand_df['Start Year'].astype(str) + " ~ " + brand_df['End Year'].astype(str)
+    order = ['Brand','Model','Typ','年份','HSN','TSN','created date','OE sensor','OE Nummer','Manufacturer','Frequency']
+    brand_df = brand_df.reindex(columns=order)
+    path = os.path.join(folder_path, f"{sanitize_filename(brand)}_Data.xlsx")
+    brand_df.to_excel(path, index=False)
+
+def _ensure_brand_excel(brand, folder_path):
+    brand_path = os.path.join(folder_path, f"{sanitize_filename(brand)}_Data.xlsx")
+    if os.path.exists(brand_path):
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        bdf = pd.read_sql_query('SELECT * FROM view_tpms_sensors_unique1 WHERE "Brand"=?', conn, params=(brand,))
+        conn.close()
+        if not bdf.empty:
+            _brand_df_to_excel(bdf, brand, folder_path)
+            print(f"📄 補產 Excel: {brand} → {len(bdf)} 筆")
+    except Exception as e:
+        print(f"⚠️ 補產 Excel 失敗 {brand}: {e}")
+
+def _write_brand_diff(brand, folder_path, all_diff_records):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql_query('SELECT * FROM view_tpms_sensors_unique1 WHERE "Brand"=?', conn, params=(brand,))
+        conn.close()
+        if not df.empty:
+            for col in ['HSN', 'TSN', 'created date', 'OE sensor', 'OE Nummer', 'Manufacturer', 'Frequency']:
+                if col in df.columns:
+                    df[col] = df[col].apply(add_space_after_comma)
+            df['年份'] = df['Start Year'].astype(str) + " ~ " + df['End Year'].astype(str)
+            _brand_df_to_excel(df.copy(), brand, folder_path)
+        new_recs = export_diff_excel(brand, GLOBAL_OLD_DB_DF, df)
+        all_diff_records.extend(new_recs)
+        append_diff_to_excel(folder_path, all_diff_records)
+    except Exception as e:
+        print(f"⚠️ 寫入品牌資料失敗 {brand}: {e}")
+
+def recover_missing_excels(folder_path):
+    if not os.path.exists(DB_PATH):
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.execute('SELECT DISTINCT "Brand" FROM view_tpms_sensors_unique1')
+        db_brands = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        for b in db_brands:
+            _ensure_brand_excel(b, folder_path)
+        print("✅ 復原檢查完成")
+    except Exception as e:
+        print(f"⚠️ 復原檢查異常: {e}")
+
+# ==========================================
+# 7. 主程式 (爬蟲核心迴圈)
 # ==========================================
 def main_scraper_all():
     global GLOBAL_OLD_DB_DF
@@ -280,6 +444,8 @@ def main_scraper_all():
     os.makedirs(folder_path, exist_ok=True)
     
     upgrade_db_schema()
+
+    backup_db()
 
     if os.path.exists(DB_PATH):
         try:
@@ -293,6 +459,8 @@ def main_scraper_all():
                         GLOBAL_OLD_DB_DF[col] = GLOBAL_OLD_DB_DF[col].apply(add_space_after_comma)
                 if 'Start Year' in GLOBAL_OLD_DB_DF.columns and 'End Year' in GLOBAL_OLD_DB_DF.columns:
                     GLOBAL_OLD_DB_DF['年份'] = GLOBAL_OLD_DB_DF['Start Year'].astype(str) + " ~ " + GLOBAL_OLD_DB_DF['End Year'].astype(str)
+            
+            recover_missing_excels(folder_path)
         except Exception as e:
             print(f"⚠️ 載入舊資料庫比對檔發生錯誤: {e}")
 
@@ -319,8 +487,8 @@ def main_scraper_all():
             "Brand",
             "Model",
             "Typ",
-            MIN("Start Year") AS "Start Year",
-            MAX("End Year") AS "End Year",
+            "Start Year",
+            "End Year",
             GROUP_CONCAT(DISTINCT "HSN") AS "HSN",
             GROUP_CONCAT(DISTINCT "TSN") AS "TSN",
             GROUP_CONCAT(DISTINCT "created date") AS "created date",
@@ -329,7 +497,7 @@ def main_scraper_all():
             GROUP_CONCAT(DISTINCT "Manufacturer") AS "Manufacturer",
             GROUP_CONCAT(DISTINCT "Frequency") AS "Frequency"
         FROM tpms_sensors
-        GROUP BY "Brand", "Model", "Typ";
+        GROUP BY "Brand", "Model", "Typ", "Start Year", "End Year";
     ''')
     conn.commit()
     conn.close()
@@ -337,184 +505,180 @@ def main_scraper_all():
     batch_data = []
     completed_brands = []
     time_limit_reached = False
+    today_str = datetime.now().strftime('%Y%m%d')
+    all_diff_records = []
 
     print(f"🔍 共 {len(brands)} 個Brand\n")
 
-    for brand in tqdm(brands, desc="總進度", ncols=100):
-        if time_limit_reached: break
-
-        if skip_mode and brand != prog.get("last_brand"):
-            tqdm.write(f"⏭️ 已完成: {brand} ✅")
-            completed_brands.append(brand)
-            continue
-
-        if skip_mode and brand == prog.get("last_brand"):
-            skip_mode = False
-            tqdm.write(f"▶️ 從 {brand} 繼續...")
-
-        tqdm.write(f"\n🚗 正在處理: 【{brand}】")
-        save_progress(brand=brand)
-
-        classes = get_classes(brand)
-        if not isinstance(classes, list): classes = []
-
-        for car_class in tqdm(classes, desc=f"{brand} Model", leave=False, ncols=80):
+    try:
+        for brand in tqdm(brands, desc="總進度", ncols=100):
             if time_limit_reached: break
 
-            type_groups = get_type_groups(brand, car_class)
-            if not isinstance(type_groups, list): type_groups = []
+            if skip_mode and brand != prog.get("last_brand"):
+                tqdm.write(f"⏭️ 已完成: {brand} ✅")
+                completed_brands.append(brand)
+                _ensure_brand_excel(brand, folder_path)
+                continue
 
-            for tg_data in type_groups:
+            if skip_mode and brand == prog.get("last_brand"):
+                skip_mode = False
+                tqdm.write(f"▶️ 從 {brand} 繼續...")
+
+            tqdm.write(f"\n🚗 正在處理: 【{brand}】")
+            save_progress(brand=brand)
+
+            classes = get_classes(brand)
+            if not isinstance(classes, list): classes = []
+
+            for car_class in tqdm(classes, desc=f"{brand} Model", leave=False, ncols=80):
                 if time_limit_reached: break
 
-                tg_id = tg_data.get("group") if isinstance(tg_data, dict) else None
-                if not tg_id: continue
+                type_groups = get_type_groups(brand, car_class)
+                if not isinstance(type_groups, list): type_groups = []
 
-                if skip_mode and tg_id != prog.get("last_tg"): continue
-                if skip_mode: skip_mode = False
+                for tg_data in type_groups:
+                    if time_limit_reached: break
 
-                save_progress(brand, car_class, tg_id)
+                    tg_id = tg_data.get("group") if isinstance(tg_data, dict) else None
+                    if not tg_id: continue
 
-                versions = get_versions(tg_id)
-                if not isinstance(versions, list): continue
-                versions.sort(key=lambda x: x.get('productionFrom', ''), reverse=True)
+                    if skip_mode and tg_id != prog.get("last_tg"): continue
+                    if skip_mode: skip_mode = False
 
-                for version in versions:
-                    if time.time() - PROGRAM_START_TIME > MAX_RUNTIME_SECONDS:
-                        tqdm.write(f"\n⏱️ 警告：執行時間即將超過限制！觸發安全暫停...")
-                        time_limit_reached = True
-                        break
+                    save_progress(brand, car_class, tg_id)
 
-                    car_tag = str(version.get("tag") or version.get("carTag") or "")
-                    if not car_tag: continue
+                    versions = get_versions(tg_id)
+                    if not isinstance(versions, list): continue
+                    versions.sort(key=lambda x: x.get('productionFrom', ''), reverse=True)
 
-                    year_from = format_year(version.get("productionFrom"))
-                    year_to = format_year(version.get("productionTo"))
-                    model_version = version.get("version", "")
+                    for version in versions:
+                        if time.time() - PROGRAM_START_TIME > MAX_RUNTIME_SECONDS:
+                            tqdm.write(f"\n⏱️ 警告：執行時間即將超過限制！觸發安全暫停...")
+                            time_limit_reached = True
+                            break
 
-                    time.sleep(random.uniform(0.65, 1.35))
+                        car_tag = str(version.get("tag") or version.get("carTag") or "")
+                        if not car_tag: continue
 
-                    try:
-                        car_details = get_car_hsn_tsn(car_tag)
-                        hsn = car_details.get("hsn", "") if isinstance(car_details, dict) else ""
-                        tsn = car_details.get("tsn", "") if isinstance(car_details, dict) else ""
+                        year_from = format_year(version.get("productionFrom"))
+                        year_to = format_year(version.get("productionTo"))
+                        model_version = version.get("version", "")
 
-                        tpms_data = get_tpms(car_tag)
-                        oe_list = []
+                        time.sleep(random.uniform(0.65, 1.35))
 
-                        if isinstance(tpms_data, dict) and "tpms" in tpms_data:
-                            sensor_ids = []
-                            for s in tpms_data["tpms"]:
-                                if s.get("oeAm") == "O":
-                                    m_id = s.get("manufacturerId") or s.get("articleId") or s.get("id") or s.get("tpmsId")
-                                    if m_id: sensor_ids.append(m_id)
-                            
-                            details_dict = {}
-                            if sensor_ids:
-                                time.sleep(random.uniform(0.3, 0.7)) 
-                                detailed_info = get_sensor_details(sensor_ids)
-                                if isinstance(detailed_info, list):
-                                    for item in detailed_info:
-                                        item_id = item.get("manufacturerId") or item.get("id") or item.get("articleId")
-                                        if item_id: details_dict[str(item_id)] = item
-                                elif isinstance(detailed_info, dict):
-                                    data_list = detailed_info.get("data", []) or detailed_info.get("items", [])
-                                    if isinstance(data_list, list):
-                                        for item in data_list:
+                        try:
+                            car_details = get_car_hsn_tsn(car_tag)
+                            hsn = car_details.get("hsn", "") if isinstance(car_details, dict) else ""
+                            tsn = car_details.get("tsn", "") if isinstance(car_details, dict) else ""
+
+                            tpms_data = get_tpms(car_tag)
+                            oe_list = []
+
+                            if isinstance(tpms_data, dict) and "tpms" in tpms_data:
+                                sensor_ids = []
+                                for s in tpms_data["tpms"]:
+                                    if s.get("oeAm") == "O":
+                                        m_id = s.get("manufacturerId") or s.get("articleId") or s.get("id") or s.get("tpmsId")
+                                        if m_id: sensor_ids.append(m_id)
+                                
+                                details_dict = {}
+                                if sensor_ids:
+                                    time.sleep(random.uniform(0.3, 0.7)) 
+                                    detailed_info = get_sensor_details(sensor_ids)
+                                    if isinstance(detailed_info, list):
+                                        for item in detailed_info:
                                             item_id = item.get("manufacturerId") or item.get("id") or item.get("articleId")
                                             if item_id: details_dict[str(item_id)] = item
-                                    else:
-                                        details_dict = detailed_info
-
-                            for s in tpms_data["tpms"]:
-                                if s.get("oeAm") == "O":
-                                    m_id = str(s.get("manufacturerId") or s.get("articleId") or s.get("id") or s.get("tpmsId") or "")
-                                    s_detail = details_dict.get(m_id, {}) if m_id else {}
-
-                                    hersteller = s_detail.get("hersteller") or s.get("hersteller") or find_key_value(s, ['hersteller','manufacturer','marke'])
-                                    frequenz = s_detail.get("frequenz") or s.get("frequenz") or find_key_value(s, ['frequenz','frequency','mhz'])
-                                    oe_nummer = s_detail.get("oeNummer") or s_detail.get("artikelnummer") or s.get("oeNummer") or find_key_value(s_detail, ['oenummer', 'artikelnummer', 'article', 'nummer']) or find_key_value(s, ['oenummer', 'artikelnummer', 'article', 'nummer'])
-                                    
-                                    if not frequenz:
-                                        sd = str(s).lower() + str(s_detail).lower()
-                                        frequenz = '433' if '433' in sd else '434' if '434' in sd else '315' if '315' in sd else ''
-                                    
-                                    baujahr = s_detail.get("baujahr") or s.get("baujahr", "")
-                                    if not baujahr:
-                                        s_str = str(s) + str(s_detail)
-                                        match = re.search(r'(\d{2}/\d{4}\s*-(\s*\d{2}/\d{4})?)', s_str)
-                                        if match:
-                                            baujahr = match.group(1).strip()
+                                    elif isinstance(detailed_info, dict):
+                                        data_list = detailed_info.get("data", []) or detailed_info.get("items", [])
+                                        if isinstance(data_list, list):
+                                            for item in data_list:
+                                                item_id = item.get("manufacturerId") or item.get("id") or item.get("articleId")
+                                                if item_id: details_dict[str(item_id)] = item
                                         else:
-                                            baujahr = find_key_value(s, ['baujahr'])
-                                            
-                                    if not baujahr or baujahr == "0000-00-00":
-                                        baujahr = f"{year_from} ~ {year_to}"
+                                            details_dict = detailed_info
+
+                                for s in tpms_data["tpms"]:
+                                    if s.get("oeAm") == "O":
+                                        m_id = str(s.get("manufacturerId") or s.get("articleId") or s.get("id") or s.get("tpmsId") or "")
+                                        s_detail = details_dict.get(m_id, {}) if m_id else {}
+
+                                        hersteller = s.get("manufacturer", "") or s_detail.get("manufacturerName1", "")
+                                        frequenz = str(s.get("tpmsFrequency", "") or s_detail.get("frequenz", ""))
+                                        oe_nummer = s.get("oeNumber", "") or s.get("equipment", "")
                                         
-                                    oe_list.append({
-                                        "oe": str(s.get("tpmsDescFrontend", "")),
-                                        "oe_nummer": str(oe_nummer),
-                                        "baujahr": baujahr,
-                                        "hersteller": str(hersteller),
-                                        "frequenz": str(frequenz)
-                                    })
+                                        if not frequenz:
+                                            sd = str(s).lower() + str(s_detail).lower()
+                                            frequenz = '433' if '433' in sd else '434' if '434' in sd else '315' if '315' in sd else ''
+                                        
+                                        baujahr = s_detail.get("baujahr") or s.get("baujahr", "")
+                                        if not baujahr:
+                                            s_str = str(s) + str(s_detail)
+                                            match = re.search(r'(\d{2}/\d{4}\s*-(\s*\d{2}/\d{4})?)', s_str)
+                                            if match:
+                                                baujahr = match.group(1).strip()
+                                            else:
+                                                baujahr = find_key_value(s, ['baujahr'])
+                                                
+                                        if not baujahr or baujahr == "0000-00-00":
+                                            baujahr = f"{year_from} ~ {year_to}"
+                                            
+                                        oe_list.append({
+                                            "oe": str(s.get("tpmsDescFrontend", "")),
+                                            "oe_nummer": str(oe_nummer),
+                                            "baujahr": baujahr,
+                                            "hersteller": str(hersteller),
+                                            "frequenz": str(frequenz)
+                                        })
 
-                        if not oe_list:
-                            oe_list = [{"oe":"", "oe_nummer":"", "baujahr":"", "hersteller":"", "frequenz":""}]
+                            if not oe_list:
+                                oe_list = [{"oe":"", "oe_nummer":"", "baujahr":"", "hersteller":"", "frequenz":""}]
 
-                        for info in oe_list:
-                            batch_data.append({
-                                "Brand": brand, "Model": car_class, "Typ": model_version,
-                                "Start Year": year_from, "End Year": year_to,
-                                "HSN": hsn, "TSN": tsn,
-                                "created date": info["baujahr"],
-                                "OE sensor": info["oe"],
-                                "OE Nummer": info["oe_nummer"],
-                                "Manufacturer": info["hersteller"],
-                                "Frequency": info["frequenz"]
-                            })
+                            for info in oe_list:
+                                batch_data.append({
+                                    "Brand": brand, "Model": car_class, "Typ": model_version,
+                                    "Start Year": year_from, "End Year": year_to,
+                                    "HSN": hsn, "TSN": tsn,
+                                    "created date": info["baujahr"],
+                                    "OE sensor": info["oe"],
+                                    "OE Nummer": info["oe_nummer"],
+                                    "Manufacturer": info["hersteller"],
+                                    "Frequency": info["frequenz"]
+                                })
 
-                        if len(batch_data) >= 80:
-                            save_batch_to_sql(batch_data)
-                            batch_data.clear()
+                            if len(batch_data) >= 80:
+                                save_batch_to_sql(batch_data)
+                                batch_data.clear()
 
-                    except Exception as e:
-                        tqdm.write(f"⚠️ 異常 {model_version}: {e}")
+                        except Exception as e:
+                            tqdm.write(f"⚠️ 異常 {model_version}: {e}")
 
-            if batch_data:
-                save_batch_to_sql(batch_data)
-                batch_data.clear()
+                if batch_data:
+                    save_batch_to_sql(batch_data)
+                    batch_data.clear()
+
+                if not time_limit_reached:
+                    _write_brand_diff(brand, folder_path, all_diff_records)
+                    tqdm.write(f"   ✅ Model完成: {car_class}")
 
             if not time_limit_reached:
-                tqdm.write(f"   ✅ Model完成: {car_class}")
+                completed_brands.append(brand)
+                tqdm.write(f"🎉 Brand完成: 【{brand}】 ✅")
 
+    finally:
+        if batch_data:
+            save_batch_to_sql(batch_data)
+            batch_data.clear()
         try:
             conn = sqlite3.connect(DB_PATH)
-            df = pd.read_sql_query('SELECT * FROM view_tpms_sensors_unique1 WHERE "Brand"=?', conn, params=(brand,))
+            cursor = conn.execute('SELECT DISTINCT "Brand" FROM view_tpms_sensors_unique1')
+            db_brands = [row[0] for row in cursor.fetchall()]
             conn.close()
-            
-            if not df.empty:
-                for col in ['HSN', 'TSN', 'created date', 'OE sensor', 'OE Nummer', 'Manufacturer', 'Frequency']:
-                    if col in df.columns:
-                        df[col] = df[col].apply(add_space_after_comma)
-
-                df['年份'] = df['Start Year'].astype(str) + " ~ " + df['End Year'].astype(str)
-                order = ['Brand','Model','Typ','年份','HSN','TSN','created date','OE sensor','OE Nummer','Manufacturer','Frequency']
-                df = df.reindex(columns=order)
-                
-                path = os.path.join(folder_path, f"{sanitize_filename(brand)}_Data.xlsx")
-                df.to_excel(path, index=False)
-                
-                export_diff_excel(brand, GLOBAL_OLD_DB_DF, df, folder_path)
-                
-                if not time_limit_reached:
-                    tqdm.write(f"✅ {brand} Excel 匯出完成 → {len(df)} 筆")
+            for b in db_brands:
+                _ensure_brand_excel(b, folder_path)
         except Exception as e:
-            tqdm.write(f"⚠️ Excel 匯出失敗: {e}")
-
-        if not time_limit_reached:
-            completed_brands.append(brand)
-            tqdm.write(f"🎉 Brand完成: 【{brand}】 ✅")
+            print(f"⚠️ 中斷補產異常: {e}")
+        append_diff_to_excel(folder_path, all_diff_records)
 
     print("\n" + "="*60)
     if time_limit_reached:
