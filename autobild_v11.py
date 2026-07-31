@@ -20,6 +20,7 @@ AutoBild 爬蟲系統 v11.0 - 本地 VS Code 完美中斷儲存版 (含中文翻
 import subprocess
 import sys
 import os
+import glob
 import signal
 
 def install_packages():
@@ -45,13 +46,14 @@ import asyncio
 import time
 import random
 import sqlite3
+import json
 import argparse
 import pandas as pd
 import re
 from datetime import datetime, timedelta
 from urllib.parse import urljoin
 from playwright.async_api import async_playwright
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill, Font
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -62,10 +64,11 @@ class Config:
     CATALOG_URL = f"{BASE_URL}/marken-modelle/#aktuell"
     CSV_DIR = "AutoBild_Exports"
     DB_FILE = "autobild_master.db"
-    BATCH_SIZE = 50
+    BATCH_SIZE = 20
     DELAY_MIN = 0.8
     DELAY_MAX = 1.6
     MAX_RETRIES = 3
+    ENABLE_RUNTIME_LIMIT = False
     MAX_RUNTIME_HOURS = 5.5
     API_WAIT_TIMEOUT = 8
     SNAPSHOT_FILE = os.path.join(CSV_DIR, "autobild_snapshot.xlsx")
@@ -80,6 +83,51 @@ class DatabaseManager:
         self.batch = []
         self._init_db()
         self.check_and_reset_progress()
+        self.changelog_path = Config.CSV_DIR + '/autobild_changelog.xlsx'
+        self._init_changelog()
+
+    def _init_changelog(self):
+        try:
+            if os.path.exists(self.changelog_path):
+                wb = load_workbook(self.changelog_path)
+                if 'Changelog' not in wb.sheetnames:
+                    ws = wb.create_sheet('Changelog', 0)
+                    ws.append(['Timestamp', 'Action', 'Brand', 'Model', 'Category', 'Fuel_Type', 'Typ', 'Start_Year', 'End_Year', 'HSN_TSN_Old', 'HSN_TSN_New'])
+                    ws.column_dimensions['A'].width = 20
+                    for col in ['B','C','D','E','F','G','H','I','J','K']:
+                        ws.column_dimensions[col].width = 16
+                wb.close()
+            else:
+                wb = Workbook()
+                ws = wb.active
+                ws.title = 'Changelog'
+                ws.append(['Timestamp', 'Action', 'Brand', 'Model', 'Category', 'Fuel_Type', 'Typ', 'Start_Year', 'End_Year', 'HSN_TSN_Old', 'HSN_TSN_New'])
+                ws.column_dimensions['A'].width = 20
+                for col in ['B','C','D','E','F','G','H','I','J','K']:
+                    ws.column_dimensions[col].width = 16
+                wb.save(self.changelog_path)
+                wb.close()
+        except Exception:
+            pass
+
+    def _log_changelog(self, records):
+        try:
+            wb = load_workbook(self.changelog_path)
+            ws = wb['Changelog']
+            green = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+            red = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+            for action, r in records:
+                ts = time.strftime('%Y-%m-%d %H:%M:%S')
+                row_data = [ts, action, r.get('Brand',''), r.get('Model',''), r.get('Category',''), r.get('Fuel_Type',''), r.get('Typ',''), r.get('Start_Year',''), r.get('End_Year',''), r.get('_hsn_old',''), r.get('HSN_TSN','')]
+                ws.append(row_data)
+                new_row = ws.max_row
+                fill = green if action == 'INSERT' else red
+                for col in range(1, len(row_data) + 1):
+                    ws.cell(row=new_row, column=col).fill = fill
+            wb.save(self.changelog_path)
+            wb.close()
+        except Exception as e:
+            print(f"  [Changelog] 寫入失敗: {e}")
 
     def _init_db(self):
         self.cursor.execute('''
@@ -156,17 +204,46 @@ class DatabaseManager:
 
     def flush(self):
         if not self.batch: return
+        changelog_entries = []
         for r in self.batch:
+            brand = r.get('Brand', 'N/A')
+            model = r.get('Model', 'N/A')
+            cat = r.get('Category', 'N/A')
+            fuel = r.get('Fuel_Type', 'N/A')
+            typ = r.get('Typ', 'N/A')
+            sy = r.get('Start_Year', 'N/A')
+            ey = r.get('End_Year', 'N/A')
+            hsn = r.get('HSN_TSN', 'N/A')
+
             self.cursor.execute('''
-                INSERT OR IGNORE INTO car_catalog
-                (Brand, Model, Category, Fuel_Type, Typ, Start_Year, End_Year, HSN_TSN)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                r.get('Brand', 'N/A'), r.get('Model', 'N/A'), r.get('Category', 'N/A'), 
-                r.get('Fuel_Type', 'N/A'), r.get('Typ', 'N/A'), r.get('Start_Year', 'N/A'),
-                r.get('End_Year', 'N/A'), r.get('HSN_TSN', 'N/A')
-            ))
+                SELECT rowid, HSN_TSN FROM car_catalog
+                WHERE Brand=? AND Model=? AND Category=? AND Fuel_Type=? AND Typ=?
+                  AND Start_Year=? AND End_Year=?
+            ''', (brand, model, cat, fuel, typ, sy, ey))
+            existing = self.cursor.fetchone()
+
+            if existing:
+                rowid, old_hsn = existing
+                if old_hsn != hsn:
+                    if hsn != 'N/A':
+                        self.cursor.execute('UPDATE car_catalog SET HSN_TSN=? WHERE rowid=?', (hsn, rowid))
+                        r['_hsn_old'] = old_hsn
+                        changelog_entries.append(('UPDATE', r))
+                    else:
+                        pass
+                else:
+                    pass
+            else:
+                self.cursor.execute('''
+                    INSERT INTO car_catalog
+                    (Brand, Model, Category, Fuel_Type, Typ, Start_Year, End_Year, HSN_TSN)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (brand, model, cat, fuel, typ, sy, ey, hsn))
+                r['_hsn_old'] = ''
+                changelog_entries.append(('INSERT', r))
         self.conn.commit()
+        if changelog_entries:
+            self._log_changelog(changelog_entries)
         self.batch.clear()
 
     def get_progress(self, brand: str, model: str):
@@ -230,8 +307,11 @@ class SnapshotManager:
     ALL_COLS = ['Brand', 'Model', 'Category', 'Fuel_Type', 'Typ', 'Start_Year', 'End_Year', 'HSN_TSN']
 
     RED_FILL = PatternFill(start_color='FF0000', end_color='FF0000', fill_type='solid')
+    GREEN_FILL = PatternFill(start_color='00FF00', end_color='00FF00', fill_type='solid')
+    GRAY_FILL = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
     HEADER_FILL = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
     HEADER_FONT = Font(color='FFFFFF', bold=True)
+    COMPARE_FIELDS = ['Category', 'Start_Year', 'End_Year', 'HSN_TSN']
 
     @staticmethod
     def load_snapshot():
@@ -245,6 +325,11 @@ class SnapshotManager:
     @staticmethod
     def save_snapshot(df):
         try:
+            today = datetime.now().strftime('%Y-%m-%d')
+            if os.path.exists(SnapshotManager.SNAPSHOT_FILE):
+                bak = SnapshotManager.SNAPSHOT_FILE.replace('.xlsx', f'_{today}.xlsx')
+                if not os.path.exists(bak):
+                    os.rename(SnapshotManager.SNAPSHOT_FILE, bak)
             out = df[SnapshotManager.ALL_COLS] if all(c in df.columns for c in SnapshotManager.ALL_COLS) else df
             out.to_excel(SnapshotManager.SNAPSHOT_FILE, index=False, engine='openpyxl')
         except Exception as e:
@@ -258,8 +343,13 @@ class SnapshotManager:
             return
 
         for col in SnapshotManager.ALL_COLS:
-            if col in old_df.columns: old_df[col] = old_df[col].astype(str).str.strip()
-            if col in new_df.columns: new_df[col] = new_df[col].astype(str).str.strip()
+            if col in old_df.columns:
+                old_df[col] = old_df[col].apply(lambda x: '' if pd.isna(x) else str(x).strip())
+            if col in new_df.columns:
+                new_df[col] = new_df[col].apply(lambda x: '' if pd.isna(x) else str(x).strip())
+
+        old_df.replace(to_replace=r'^(N/A|n/a|NA|na|nan|NaN|Nan|null|None)$', value='', regex=True, inplace=True)
+        new_df.replace(to_replace=r'^(N/A|n/a|NA|na|nan|NaN|Nan|null|None)$', value='', regex=True, inplace=True)
 
         missing = [c for c in SnapshotManager.KEY_COLS if c not in old_df.columns or c not in new_df.columns]
         if missing:
@@ -269,6 +359,9 @@ class SnapshotManager:
 
         old_df['_key'] = old_df[SnapshotManager.KEY_COLS].agg('|'.join, axis=1)
         new_df['_key'] = new_df[SnapshotManager.KEY_COLS].agg('|'.join, axis=1)
+
+        old_df = old_df.drop_duplicates(subset='_key', keep='last')
+        new_df = new_df.drop_duplicates(subset='_key', keep='last')
 
         old_keys = set(old_df['_key'])
         new_keys = set(new_df['_key'])
@@ -293,7 +386,7 @@ class SnapshotManager:
                 if ov != nv:
                     changes[col] = (ov, nv)
             if changes:
-                modified.append((new_row.to_dict(), changes))
+                modified.append((old_row.to_dict(), new_row.to_dict(), changes))
 
         has_new = not new_records.empty
         has_mod = len(modified) > 0
@@ -304,20 +397,44 @@ class SnapshotManager:
             SnapshotManager.save_snapshot(new_df)
             return
 
-        wb = Workbook()
+        today = datetime.now().strftime('%Y-%m-%d')
+        if os.path.exists(SnapshotManager.DIFF_FILE):
+            wb = load_workbook(SnapshotManager.DIFF_FILE)
+            if today in wb.sheetnames:
+                ws = wb[today]
+                row = ws.max_row + 2
+                ws.cell(row=row - 1, column=1, value=f'--- {datetime.now().strftime("%H:%M")} ---')
+            else:
+                ws = wb.create_sheet(today, 0)
+                row = 1
+        else:
+            wb = Workbook()
+            wb.remove(wb.active)
+            ws = wb.create_sheet(today, 0)
+            row = 1
 
-        ws_new = wb.active
-        ws_new.title = '新增車款'
-        SnapshotManager._write_full_sheet(ws_new, new_records, has_new)
+        if row == 1:
+            headers = ['狀態'] + SnapshotManager.KEY_COLS
+            for f in SnapshotManager.COMPARE_FIELDS:
+                headers.append(f'{f}(O)')
+                headers.append(f'{f}(N)')
+            SnapshotManager._write_header(ws, headers)
+            row = 2
 
-        ws_mod = wb.create_sheet('修改車款')
-        SnapshotManager._write_modified_sheet(ws_mod, modified, has_mod)
+        for _, old_row in removed_records.iterrows():
+            SnapshotManager._write_status_row(ws, row, '刪除', old_row.to_dict(), None, SnapshotManager.RED_FILL, None)
+            row += 1
 
-        ws_del = wb.create_sheet('刪除車款')
-        SnapshotManager._write_full_sheet(ws_del, removed_records, has_del)
+        for old_data, new_data, changes in modified:
+            SnapshotManager._write_status_row(ws, row, '修改', old_data, new_data, SnapshotManager.RED_FILL, SnapshotManager.GREEN_FILL, changes)
+            row += 1
+
+        for _, new_row in new_records.iterrows():
+            SnapshotManager._write_status_row(ws, row, '新增', None, new_row.to_dict(), None, SnapshotManager.GREEN_FILL)
+            row += 1
 
         wb.save(SnapshotManager.DIFF_FILE)
-        print(f"\n  [Diff] 📊 差異報告: {SnapshotManager.DIFF_FILE}")
+        print(f"\n  [Diff] 📊 差異報告: {SnapshotManager.DIFF_FILE} (分頁: {today})")
         print(f"    ├─ 新增: {len(new_records)} 筆")
         print(f"    ├─ 修改: {len(modified)} 筆")
         print(f"    └─ 刪除: {len(removed_records)} 筆")
@@ -332,32 +449,22 @@ class SnapshotManager:
             cell.font = SnapshotManager.HEADER_FONT
 
     @staticmethod
-    def _write_full_sheet(ws, records_df, has_data):
-        cols = [c for c in SnapshotManager.ALL_COLS if c != '_key']
-        if has_data:
-            SnapshotManager._write_header(ws, cols)
-            for ri, (_, row) in enumerate(records_df.iterrows(), 2):
-                for ci, col in enumerate(cols, 1):
-                    ws.cell(row=ri, column=ci, value=row.get(col, ''))
-        else:
-            ws.cell(row=1, column=1, value='無資料')
+    def _write_status_row(ws, row, status, old_data, new_data, old_fill, new_fill, changes=None):
+        ws.cell(row=row, column=1, value=status)
+        for ci, col in enumerate(SnapshotManager.KEY_COLS, 2):
+            val = (new_data or old_data or {}).get(col, '')
+            ws.cell(row=row, column=ci, value=val)
 
-    @staticmethod
-    def _write_modified_sheet(ws, modified_list, has_data):
-        headers = SnapshotManager.KEY_COLS + ['異動欄位', '舊值', '新值']
-        if has_data:
-            SnapshotManager._write_header(ws, headers)
-            for ri, (row_data, changes) in enumerate(modified_list, 2):
-                for ci, col in enumerate(SnapshotManager.KEY_COLS, 1):
-                    ws.cell(row=ri, column=ci, value=row_data.get(col, ''))
-                col_str = ', '.join(changes.keys())
-                old_str = ', '.join([f"{k}={v[0]}" for k, v in changes.items()])
-                new_str = ', '.join([f"{k}={v[1]}" for k, v in changes.items()])
-                ws.cell(row=ri, column=len(SnapshotManager.KEY_COLS)+1, value=col_str).fill = SnapshotManager.RED_FILL
-                ws.cell(row=ri, column=len(SnapshotManager.KEY_COLS)+2, value=old_str).fill = SnapshotManager.RED_FILL
-                ws.cell(row=ri, column=len(SnapshotManager.KEY_COLS)+3, value=new_str).fill = SnapshotManager.RED_FILL
-        else:
-            ws.cell(row=1, column=1, value='無資料')
+        for fi, f in enumerate(SnapshotManager.COMPARE_FIELDS):
+            col_o = 2 + len(SnapshotManager.KEY_COLS) + fi * 2
+            col_n = col_o + 1
+            ov = (old_data or {}).get(f, '')
+            nv = (new_data or {}).get(f, '')
+            ws.cell(row=row, column=col_o, value=ov if ov else '')
+            ws.cell(row=row, column=col_n, value=nv if nv else '')
+            is_changed = changes is None or f in changes
+            if old_fill and ov and is_changed: ws.cell(row=row, column=col_o).fill = old_fill
+            if new_fill and nv and is_changed: ws.cell(row=row, column=col_n).fill = new_fill
 
 
 async def smart_delay(success=True):
@@ -406,6 +513,8 @@ class AutoBildScraper:
     def should_stop(self):
         if self.is_interrupted:
             return True
+        if not Config.ENABLE_RUNTIME_LIMIT:
+            return False
         elapsed = (time.time() - self.start_time) / 3600
         if elapsed >= Config.MAX_RUNTIME_HOURS:
             print(f"\n[Timeout] 觸發超時保護 (>{Config.MAX_RUNTIME_HOURS} hours), 準備安全停止...")
@@ -415,22 +524,41 @@ class AutoBildScraper:
     async def handle_api_response(self, response):
         try:
             url = response.url.lower()
+            if response.status != 200: return
             ct = response.headers.get('content-type', '')
-            is_api = ('api' in url or 'graphql' in url)
-            is_json = ('json' in ct or url.endswith('.json'))
-            has_vehicle_kw = any(k in url for k in ['hsn', 'tsn', 'schluessel', 'vehicle', 'fahrzeug', 'typ', 'daten'])
-            if response.status == 200 and (is_api or is_json) and (has_vehicle_kw or 'json' in ct):
-                try:
-                    data = await response.json()
-                    if isinstance(data, (dict, list)):
-                        self.api_hsn_tsn = data
-                        self.api_captured = True
-                except Exception: pass
+            if 'json' not in ct and not url.endswith('.json'): return
+            if '/api/' not in url: return
+
+            try:
+                data = await response.json()
+            except Exception:
+                return
+            if not isinstance(data, (dict, list)): return
+
+            data_str = str(data)
+            if 'tcert' in data_str.lower():
+                print(f'  [API] tcert FOUND in: {response.url[:180]}')
+                self.api_hsn_tsn = data
+                self.api_captured = True
+            elif url.startswith('https://www.autobild.de/api'):
+                print(f'  [API] {response.url[:180]}')
+        except Exception:
+            pass
         except Exception: pass
 
     async def collect_brand_urls(self, page):
         print("\n[Step 1] Collecting brand URLs...")
-        await page.goto(Config.CATALOG_URL, timeout=90000, wait_until="domcontentloaded")
+        for attempt in range(3):
+            try:
+                await page.goto(Config.CATALOG_URL, timeout=90000, wait_until="domcontentloaded")
+                break
+            except Exception as e:
+                if attempt < 2:
+                    wait = (attempt + 1) * 5
+                    print(f"    [Retry] 品牌列表載入失敗 ({e.__class__.__name__}), {wait}秒後重試 ({attempt+1}/3)...")
+                    await asyncio.sleep(wait)
+                else:
+                    raise
         await dismiss_cookie(page)
 
         for scroll_y in range(0, 3000, 600):
@@ -471,7 +599,17 @@ class AutoBildScraper:
     async def collect_model_urls(self, page, brand_url):
         brand_name = brand_url.strip('/').split('/')[-1].upper()
         print(f"\n> Entering brand: {brand_name}")
-        await page.goto(brand_url, timeout=60000, wait_until="domcontentloaded")
+        for attempt in range(3):
+            try:
+                await page.goto(brand_url, timeout=90000, wait_until="domcontentloaded")
+                break
+            except Exception as e:
+                if 'ERR_NETWORK_CHANGED' in str(e) and attempt < 2:
+                    wait = (attempt + 1) * 3
+                    print(f"    [Retry] 網路不穩 ({e.__class__.__name__}), {wait}秒後重試 ({attempt+1}/3)...")
+                    await asyncio.sleep(wait)
+                else:
+                    raise
         await dismiss_cookie(page)
         await smart_delay()
 
@@ -592,29 +730,51 @@ class AutoBildScraper:
                 return false;
             }''', variant_index)
 
+            print(f"    [DEBUG overlay {variant_index}] clicked={clicked}")
             if not clicked: return "N/A"
             await asyncio.sleep(Config.API_WAIT_TIMEOUT)
 
+            print(f"    [DEBUG overlay {variant_index}] api_captured={self.api_captured}, api_hsn_tsn={'YES' if self.api_hsn_tsn else 'None'}")
+
+            result = "N/A"
             if self.api_hsn_tsn:
+                data_str = str(self.api_hsn_tsn)
+                print(f"    [DEBUG] api_hsn_tsn keys={list(self.api_hsn_tsn.keys()) if isinstance(self.api_hsn_tsn, dict) else type(self.api_hsn_tsn)} data={data_str[:300]}")
                 hsn, tsn = self._find_hsn_tsn_pair(self.api_hsn_tsn)
-                if hsn and tsn: return f"{hsn}/{tsn}"
+                if hsn and tsn: result = f"{hsn}/{tsn}"
+                elif hsn and not tsn: result = hsn
 
-            hsn_from_dom = await page.evaluate(r'''() => {
-                const overlay = document.querySelector('.vvp');
-                if (!overlay) return null;
-                const txt = overlay.innerText || '';
-                const hsnL = txt.match(/HSN[:\s]*(\d{4})/i);
-                const tsnL = txt.match(/TSN[:\s]*([A-Z0-9]{2,6})/i);
-                if (hsnL && tsnL) return hsnL[1] + '/' + tsnL[1];
-                const gen = txt.match(/(\d{4})\s*[\/\-]\s*([A-Z0-9]{2,6})/);
-                return gen ? gen[1] + '/' + gen[2] : null;
-            }''')
-
-            if hsn_from_dom: return hsn_from_dom
+            if result == "N/A":
+                evaluate_result = await page.evaluate(r'''() => {
+                    const overlay = document.querySelector('.vvp') || document.querySelector('.sectionOverlay') || document.querySelector('[class*="overlay"]');
+                    if (!overlay) return JSON.stringify({hsn: null, text: '__NO_OVERLAY__'});
+                    const txt = overlay.innerText || overlay.textContent || '';
+                    const m = txt.match(/HSN\/TSN\s*Schlüsselnummern[\s\S]{0,80}/i);
+                    if (m) {
+                        const pairs = [];
+                        const re = /(\d{4})\s*[\/\-]\s*([A-Z0-9]{2,6})/gi;
+                        let mm;
+                        while ((mm = re.exec(m[0])) !== null) pairs.push(mm[1] + '/' + mm[2]);
+                        if (pairs.length) return JSON.stringify({hsn: pairs.join(', '), text: txt.slice(0,500)});
+                    }
+                    const hsnL = txt.match(/HSN[:\s]*(\d{4})/i);
+                    const tsnL = txt.match(/TSN[:\s]*([A-Z0-9]{2,6})/i);
+                    if (hsnL && tsnL) return JSON.stringify({hsn: hsnL[1] + '/' + tsnL[1], text: txt.slice(0,500)});
+                    const gen = txt.match(/(\d{4})\s*[\/\-]\s*([A-Z0-9]{2,6})/);
+                    const h = gen ? gen[1] + '/' + gen[2] : null;
+                    return JSON.stringify({hsn: h, text: txt.slice(0,500)});
+                }''')
+                dom_data = json.loads(evaluate_result)
+                print(f"    [DEBUG overlay {variant_index}] dom_hsn={dom_data.get('hsn')}, overlay_text={dom_data.get('text','')[:200]}")
+                if dom_data.get('hsn'): result = dom_data['hsn']
 
             await page.evaluate("const btn = document.querySelector('.sectionOverlay__buttonClose'); if (btn) btn.click();")
-            await asyncio.sleep(1.0)
-        except Exception:
+            await asyncio.sleep(0.5)
+            print(f"    [DEBUG overlay {variant_index}] result={result}")
+            return result
+
+        except Exception as e:
+            print(f"    [DEBUG overlay {variant_index}] EXCEPTION: {e}")
             try:
                 await page.evaluate("const btn = document.querySelector('.sectionOverlay__buttonClose'); if (btn) btn.click();")
                 await asyncio.sleep(0.5)
@@ -624,6 +784,30 @@ class AutoBildScraper:
     def _find_hsn_tsn_pair(self, data, depth=0):
         if depth > 10: return None, None
         if isinstance(data, dict):
+            tcert_key = next((k for k in data if 'tcert' in str(k).lower()), None)
+            if tcert_key:
+                tcert_list = data[tcert_key]
+                pairs = []
+                if isinstance(tcert_list, list):
+                    for entry in tcert_list:
+                        if isinstance(entry, dict) and 'Num' in entry and 'Num2' in entry:
+                            hv = str(entry.get('Num', '') or '').strip()
+                            tv = str(entry.get('Num2', '') or '').strip()
+                            if hv and tv and hv != '-' and tv != '-':
+                                hsn_clean = re.sub(r'\D', '', hv)[:4]
+                                tsn_clean = re.sub(r'[^A-Z0-9]', '', tv.upper())[:6]
+                                if hsn_clean and tsn_clean:
+                                    pairs.append(f"{hsn_clean}/{tsn_clean}")
+                    if pairs:
+                        return ', '.join(pairs), None
+                elif isinstance(tcert_list, dict) and 'Num' in tcert_list and 'Num2' in tcert_list:
+                    hv = str(tcert_list.get('Num', '') or '').strip()
+                    tv = str(tcert_list.get('Num2', '') or '').strip()
+                    if hv and tv and hv != '-' and tv != '-':
+                        hsn_clean = re.sub(r'\D', '', hv)[:4]
+                        tsn_clean = re.sub(r'[^A-Z0-9]', '', tv.upper())[:6]
+                        if hsn_clean and tsn_clean:
+                            return f"{hsn_clean}/{tsn_clean}", None
             hsn_k = next((k for k in data if 'hsn' in str(k).lower()), None)
             tsn_k = next((k for k in data if 'tsn' in str(k).lower()), None)
             if hsn_k and tsn_k:
@@ -636,13 +820,14 @@ class AutoBildScraper:
             for v in data.values():
                 h, t = self._find_hsn_tsn_pair(v, depth + 1)
                 if h and t: return h, t
+                if h and not t: return h, None
         elif isinstance(data, list):
             for item in data:
                 h, t = self._find_hsn_tsn_pair(item, depth + 1)
                 if h and t: return h, t
         return None, None
 
-    def build_records(self, brand, model, page_data, fuel_type_filter=None):
+    def build_records(self, brand, model, page_data, fuel_type_filter=None, fallback=False):
         records = []
         body_type = page_data.get('jsonBodyType') or 'N/A'
         
@@ -693,17 +878,19 @@ class AutoBildScraper:
             
             fuel_zh = fuel_map.get(fuel.lower(), fuel)
 
-            year = page_data.get('jsonBuildingPeriod') or 'N/A'
-            if year == 'N/A': 
-                year = extract_date_range(page_data.get('headerSubtitle', ''))
-
+            v_date = v.get('dateRange', '')
             start_year, end_year = 'N/A', 'N/A'
-            if year and year != 'N/A':
-                parts = re.split(r'\s*[–-]\s*', year.replace('seit ', ''))
+            if v_date:
+                parts = re.split(r'\s*[–-]\s*', v_date.replace('seit ', ''))
                 if len(parts) == 2:
-                    start_year, end_year = parts[0].strip(), parts[1].strip()
+                    sy = parts[0].strip().split('/')
+                    ey = parts[1].strip().split('/')
+                    start_year = sy[1] if len(sy) > 1 else sy[0]
+                    end_year = ey[1] if len(ey) > 1 else ey[0]
                 elif len(parts) == 1:
-                    start_year, end_year = parts[0].strip(), '至今'
+                    sy = parts[0].strip().split('/')
+                    start_year = sy[1] if len(sy) > 1 else sy[0]
+                    end_year = '至今'
 
             records.append({
                 'Brand': brand, 
@@ -716,12 +903,29 @@ class AutoBildScraper:
                 'HSN_TSN': 'N/A'
             })
             
+        if not records and fallback:
+            period = page_data.get('jsonBuildingPeriod') or 'N/A'
+            start_year, end_year = 'N/A', 'N/A'
+            if period != 'N/A':
+                parts = re.split(r'\s*[–-]\s*', period.replace('seit ', ''))
+                if len(parts) == 2:
+                    start_year, end_year = parts[0].strip(), parts[1].strip()
+                elif len(parts) == 1:
+                    start_year, end_year = parts[0].strip(), '至今'
+            records.append({
+                'Brand': brand, 'Model': model, 'Category': body_type,
+                'Fuel_Type': 'N/A', 'Typ': f'{model} ({period})' if period != 'N/A' else model,
+                'Start_Year': start_year, 'End_Year': end_year, 'HSN_TSN': 'N/A'
+            })
+            
         return records
 
     async def process_model(self, page, brand, model_url):
         model_name = model_url.strip('/').split('/')[-1].replace('-', ' ').title()
         
-        if self.should_stop(): return False
+        if self.should_stop():
+            self.db.flush()
+            return False
 
         await page.goto(model_url, timeout=60000, wait_until="domcontentloaded")
         await dismiss_cookie(page)
@@ -736,6 +940,8 @@ class AutoBildScraper:
         if not has_variants:
             page_data = await self.extract_page_data(page)
             records = self.build_records(brand, model_name, page_data)
+            if not records:
+                records = self.build_records(brand, model_name, page_data, fallback=True)
             if records:
                 saved = self.db.get_progress(brand, model_name)
                 if saved is not None and saved == len(records) and not self.test_mode:
@@ -743,8 +949,11 @@ class AutoBildScraper:
                     return True
 
                 for r in records: self.db.add_to_batch(r)
+                self.db.flush()
                 if not self.should_stop():
                     self.db.update_progress(brand, model_name, len(records))
+                    csv_count = self.db.export_brand_csv(brand)
+                    print(f"    [CSV] 已更新 {brand}.csv ({csv_count} 筆)")
                 print(f"  [OK] [{model_name}] 單一規格: {len(records)} 筆")
             return True
 
@@ -768,7 +977,7 @@ class AutoBildScraper:
             sys.stdout.write(f"\r      [{i+1}/{len(records)}] {record['Fuel_Type'][:8]} - {record['Typ'][:25]}...")
             sys.stdout.flush()
 
-            if record['HSN_TSN'] == 'N/A' and i < 10:
+            if record['HSN_TSN'] == 'N/A':
                 hsn = await self.try_extract_hsn_tsn_from_overlay(page, i)
                 if hsn != 'N/A': record['HSN_TSN'] = hsn
 
@@ -779,6 +988,8 @@ class AutoBildScraper:
         if not self.should_stop():
             self.db.flush()
             self.db.update_progress(brand, model_name, variant_count)
+            csv_count = self.db.export_brand_csv(brand)
+            print(f"    [CSV] 已更新 {brand}.csv ({csv_count} 筆)")
         else:
             self.db.flush()
             return False
@@ -790,7 +1001,26 @@ class AutoBildScraper:
         print("  AutoBild Scraper v11.0 - VS Code 本地完美中斷存檔版")
         print(f"  Mode: {'Test' if self.test_mode else 'Full'}")
         if self.target_brand: print(f"  Target Brand: {self.target_brand}")
+        print(f"  Timeout Protection: {'enabled' if Config.ENABLE_RUNTIME_LIMIT else 'disabled (run until complete)'}")
         print("=" * 50 + "\n")
+
+        db_bak = Config.DB_FILE.replace('.db', '_backup.db')
+        if os.path.exists(Config.DB_FILE):
+            try:
+                conn = sqlite3.connect(Config.DB_FILE)
+                count = conn.execute("SELECT COUNT(*) FROM car_catalog").fetchone()[0]
+                conn.close()
+            except Exception:
+                count = 0
+            if count > 0:
+                try:
+                    import shutil
+                    shutil.copy2(Config.DB_FILE, db_bak)
+                    print(f"  [Backup] DB 備份: {db_bak} ({count} 筆)")
+                except Exception as e:
+                    print(f"  [Backup] DB 備份失敗: {e}")
+            else:
+                print("  [Backup] DB 為空，略過備份")
 
         old_snapshot = SnapshotManager.load_snapshot()
 
@@ -887,10 +1117,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.reset:
-        if os.path.exists(Config.DB_FILE):
-            os.remove(Config.DB_FILE)
-        for f in [Config.SNAPSHOT_FILE, Config.DIFF_FILE]:
+        for f in [Config.DB_FILE]:
             if os.path.exists(f):
+                os.remove(f)
+        for f in glob.glob(os.path.join(Config.CSV_DIR, 'autobild_snapshot_*.xlsx')):
+            os.remove(f)
+        for pat in ['autobild_snapshot*.xlsx', 'autobild_diff*.xlsx']:
+            for f in glob.glob(os.path.join(Config.CSV_DIR, pat)):
                 os.remove(f)
         print("[OK] 資料庫與快照已重置！")
         sys.exit(0)
