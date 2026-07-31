@@ -253,7 +253,7 @@ flowchart TD
     HasAPI -- 是 --> HasTcert{回應內含 tcert 資料?}
     HasTcert -- 是 --> Collect[收集所有 HSN/TSN 對]
     Collect --> Multi{多組?}
-    Multi -- 是 --> Join[以 ", " 合併<br/>例 0603/ATA, 0603/BHJ]
+    Multi -- 是 --> Join[以逗點+空格合併<br/>例 0603/ATA, 0603/BHJ]
     Multi -- 否 --> Single[單組 例 0603/ATA]
     Join --> Result[取得結果]
     Single --> Result
