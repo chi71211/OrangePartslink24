@@ -34,9 +34,6 @@ DB_PATH = os.path.join(SCRIPT_DIR, '胎壓檢測器資料庫_V10.db')
 SQL_PATH = os.path.join(SCRIPT_DIR, '胎壓檢測器資料庫_V10.sql')
 PROGRESS_FILE = os.path.join(SCRIPT_DIR, 'scrape_progress_V10.json')
 
-MAX_RUNTIME_SECONDS = 5.8 * 3600 
-PROGRAM_START_TIME = time.time()
-
 session = requests.Session()
 retry_strategy = Retry(total=5, backoff_factor=1.5, status_forcelist=[429, 500, 502, 503, 504])
 adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -504,7 +501,6 @@ def main_scraper_all():
 
     batch_data = []
     completed_brands = []
-    time_limit_reached = False
     today_str = datetime.now().strftime('%Y%m%d')
     all_diff_records = []
 
@@ -512,8 +508,6 @@ def main_scraper_all():
 
     try:
         for brand in tqdm(brands, desc="總進度", ncols=100):
-            if time_limit_reached: break
-
             if skip_mode and brand != prog.get("last_brand"):
                 tqdm.write(f"⏭️ 已完成: {brand} ✅")
                 completed_brands.append(brand)
@@ -531,14 +525,10 @@ def main_scraper_all():
             if not isinstance(classes, list): classes = []
 
             for car_class in tqdm(classes, desc=f"{brand} Model", leave=False, ncols=80):
-                if time_limit_reached: break
-
                 type_groups = get_type_groups(brand, car_class)
                 if not isinstance(type_groups, list): type_groups = []
 
                 for tg_data in type_groups:
-                    if time_limit_reached: break
-
                     tg_id = tg_data.get("group") if isinstance(tg_data, dict) else None
                     if not tg_id: continue
 
@@ -552,11 +542,6 @@ def main_scraper_all():
                     versions.sort(key=lambda x: x.get('productionFrom', ''), reverse=True)
 
                     for version in versions:
-                        if time.time() - PROGRAM_START_TIME > MAX_RUNTIME_SECONDS:
-                            tqdm.write(f"\n⏱️ 警告：執行時間即將超過限制！觸發安全暫停...")
-                            time_limit_reached = True
-                            break
-
                         car_tag = str(version.get("tag") or version.get("carTag") or "")
                         if not car_tag: continue
 
@@ -657,13 +642,11 @@ def main_scraper_all():
                     save_batch_to_sql(batch_data)
                     batch_data.clear()
 
-                if not time_limit_reached:
-                    _write_brand_diff(brand, folder_path, all_diff_records)
-                    tqdm.write(f"   ✅ Model完成: {car_class}")
+                _write_brand_diff(brand, folder_path, all_diff_records)
+                tqdm.write(f"   ✅ Model完成: {car_class}")
 
-            if not time_limit_reached:
-                completed_brands.append(brand)
-                tqdm.write(f"🎉 Brand完成: 【{brand}】 ✅")
+            completed_brands.append(brand)
+            tqdm.write(f"🎉 Brand完成: 【{brand}】 ✅")
 
     finally:
         if batch_data:
@@ -681,13 +664,8 @@ def main_scraper_all():
         append_diff_to_excel(folder_path, all_diff_records)
 
     print("\n" + "="*60)
-    if time_limit_reached:
-        print("⏸️ 爬蟲任務因接近超時限制而暫停！")
-        print(f"進度已安全儲存，下次將從斷點繼續。")
-    else:
-        print("🎊 爬蟲任務全部完成！")
-        save_progress(completed=True)
-
+    print("🎊 爬蟲任務全部完成！")
+    save_progress(completed=True)
     print(f"✅ 此次共完整處理 {len(completed_brands)} 個Brand")
     print("="*60)
 
